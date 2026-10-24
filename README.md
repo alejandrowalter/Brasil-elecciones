@@ -13,6 +13,10 @@
 - Bloques: **izquierda** PT, PSB, PDT, PSOL, PCdoB, PV, Rede (+ PCB, PCO, PSTU, UP). **Centro** MDB, PSD, PSDB, Podemos, Avante, Solidariedade, Cidadania, PRD, Agir, Mobiliza. **Derecha** PL, PP, Republicanos, União, Novo, DC, PRTB, Missão, Democrata.
 - El detalle por partido sigue en las tablas, el resumen de gobernadores y los tooltips.
 
+## Comparación 1ª → 2ª vuelta (presidente)
+En la vista Presidente hay tres botones sobre el mapa: **2ª vuelta** (líder actual), **1ª vuelta** (ganador del 4 oct por estado, datos oficiales TSE elección 6257) y **Cambio 1ª→2ª** (estados que **voltearon** en color fuerte del nuevo ganador con «⇄» y borde punteado; mismo ganador atenuado; sin votos de 2ª = gris rayado). Fichas: «Mismo ganador · Volteó a Flávio · Volteó a Lula · Pendiente». La tabla «Presidente por estado» y el detalle del estado muestran ambas vueltas lado a lado, el margen de la 2ª y la variación en puntos de Lula y Flávio (se mantiene la columna 2022). URL: `?pres=1t` o `?pres=cambio` abre directamente esos modos.
+**Demo:** `?demo=2t` simula una 2ª vuelta a partir de la 1ª real (votos de Lula/Flávio + transferencia del resto por bloque, variación por estado y conteo que avanza); **no son resultados reales**. Ej.: `?demo=2t&pres=cambio`.
+
 ## Panel Polymarket (en vivo)
 Debajo del mapa hay un panel con las probabilidades de **Polymarket** (mercado de apuestas, **no es un resultado oficial**):
 - Mercado principal: [Brazil Presidential Election](https://polymarket.com/event/brazil-presidential-election): probabilidad de Flávio Bolsonaro (azul) y Lula (rojo) = punto medio del libro de órdenes (CLOB `/midpoint`; si no hay, último trade), cambio en la última hora y desde que abriste la página, gráfico de las últimas 24 h (botón Zoom / 0–100%) que se va extendiendo en vivo, volumen y liquidez.
