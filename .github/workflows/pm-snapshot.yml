@@ -1,0 +1,41 @@
+name: Polymarket snapshot (pm.json)
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # GitHub no garantiza la hora exacta: en la práctica cada 5–15 min
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pm-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Descargar datos de Polymarket
+        run: python3 scripts/pm_snapshot.py pm.json
+      - name: Commit pm.json (solo si cambió)
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add pm.json
+          if git diff --cached --quiet; then
+            echo "pm.json sin cambios"; exit 0
+          fi
+          git commit -m "pm.json: copia Polymarket $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin main && git push origin HEAD:main && exit 0
+            sleep 5
+          done
+          exit 1
