@@ -434,10 +434,26 @@ const PM = {
        es:'espirito-santo-governor-election-winner-20260611183840001', rn:'rio-grande-do-norte-governor-election-winner', to:'tocantins-governor-election-winner'},
   // ids de respaldo (se re-descubren desde Gamma en cada carga)
   tok:{F:'109876868437950584369987384406356259939519193117253465815665152916226511121427', L:'30630994248667897740988010928640156931882346081873066002335460180076741328029'},
-  REFRESH_S:Q.get('pmtest')?5:30, TEST:!!Q.get('pmtest'), GAMMA_S:300, zoom:true, ser:{F:[],L:[]}, open:{}, now:{}, ev:{}, px:{}, prev:{}, ok:false, err:null, last:null, lastTry:0, nextAt:0, busy:false, gammaAt:0, hist:false, nSame:0, nTot:0
+  REFRESH_S:Q.get('pmtest')?5:30, TEST:!!Q.get('pmtest'), TEST_MODE:Q.get('pmtest'), GAMMA_S:300, zoom:true, ser:{F:[],L:[]}, open:{}, now:{}, ev:{}, px:{}, prev:{}, ok:false, err:null, last:null, lastTry:0, nextAt:0, busy:false, gammaAt:0, hist:false, mode:null, tried:false, dErr:null, snapAt:null, snapGen:null, TIMEOUT_MS:6000, nSame:0, nTot:0
 };
 const pmURL = s => 'https://polymarket.com/event/'+s;
-async function pmJSON(u){ const r=await fetch(u,{cache:'no-store'}); if(!r.ok) throw new Error(r.status+' '+u.split('?')[0]); return r.json(); }
+// fetch con límite de 6 s y mensajes de error legibles (los bloqueos del operador suelen colgar la conexión)
+async function pmFetch(u, opts={}, direct=true){
+  const host=new URL(u, location.href).host || 'archivo local';
+  const ac=new AbortController(), timer=setTimeout(()=>ac.abort(), PM.TIMEOUT_MS);
+  try{
+    if(direct && (PM.TEST_MODE==='block' || (PM.TEST_MODE==='blockthen' && (PM.blockN||0)<2))) throw new TypeError('bloqueo simulado (pmtest=block)');
+    if(direct && PM.TEST_MODE==='hang') await new Promise((_,rej)=>ac.signal.addEventListener('abort',()=>rej(Object.assign(new Error('aborted'),{name:'AbortError'}))));
+    const r=await fetch(u,{cache:'no-store',...opts,signal:ac.signal});
+    if(!r.ok) throw new Error(`HTTP ${r.status} en ${host}${new URL(u, location.href).pathname}`);
+    return await r.json();
+  }catch(e){
+    if(e.name==='AbortError') throw new Error(`sin respuesta en ${PM.TIMEOUT_MS/1000} s (${host})`);
+    if(e instanceof TypeError) throw new Error(`${e.message||'fallo de red'} (${host})${direct?' — sin conexión o bloqueado por el operador':''}`);
+    throw e;
+  }finally{ clearTimeout(timer); }
+}
+const pmJSON = u => pmFetch(u);
 // precio "mostrado" estilo Polymarket para mercados de Gamma: punto medio bid/ask si el spread ≤ 10¢, si no último precio
 function gPrice(m){ const b=+m.bestBid, a=+m.bestAsk; if(b>0 && a>0 && a-b<=0.10) return (a+b)/2; return +m.lastTradePrice || (JSON.parse(m.outcomePrices||'[0]')[0]*1); }
 function pmFindPres(ev){
@@ -455,47 +471,76 @@ const tok0 = m => { try{ return JSON.parse(m.clobTokenIds||'[]')[0]||null; }catc
 const pmMarkets = () => [PM.ev[PM.marginSlug], ...Object.values(PM.gov).map(s=>PM.ev[s])].filter(Boolean).flatMap(e=>(e.markets||[]).filter(m=>!m.closed && m.active));
 // precio en % para un mercado de Gamma: CLOB (punto medio, o último trade) si lo hay; si no, el de Gamma (puede tener hasta 5 min de caché)
 const mPrice = m => { const x=PM.px[tok0(m)]; return x&&x.p!=null ? x.p : gPrice(m)*100; };
-async function pmPost(path, toks){
-  const r=await fetch(PM.clob+path,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(toks.map(t=>({token_id:t})))});
-  if(!r.ok) throw new Error(r.status+' '+path); return r.json();
+const pmPost = (path, toks) => pmFetch(PM.clob+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(toks.map(t=>({token_id:t})))});
+function pmIngestEvents(evs){ for(const e of evs||[]) PM.ev[e.slug]=e; if(PM.ev[PM.presSlug]) pmFindPres(PM.ev[PM.presSlug]); }
+// precios de CLOB → PM.px / PM.now / serie del gráfico. t = momento del dato (ms)
+function pmIngestPrices(toks, mids, lts, t){
+  const lastMap={}; if(Array.isArray(lts)) for(const x of lts) lastMap[x.token_id]=+x.price*100;
+  let same=0, tot=0;
+  for(const tk of toks){
+    const mid = mids && !mids.__err && mids[tk]!=null ? +mids[tk]*100 : null, last = lastMap[tk]!=null ? lastMap[tk] : null;
+    const p = mid!=null ? mid : last; if(p==null) continue;
+    const old = PM.px[tk]?.p; PM.prev[tk]=old;
+    PM.px[tk]={mid, last, p, src: mid!=null?'punto medio':'último trade', same: old!=null && Math.abs(old-p)<1e-9, d: old!=null ? p-old : null};
+    if(old!=null){ tot++; if(PM.px[tk].same) same++; }
+  }
+  PM.nSame=same; PM.nTot=tot;
+  for(const k of ['F','L']){ const x=PM.px[PM.tok[k]]; if(!x) continue; PM.now[k]=x;
+    const s=PM.ser[k]; if(!s.length || t>s[s.length-1].t) s.push({t, p:x.p}); if(PM.open[k]==null) PM.open[k]=x.p; }
+  if(PM.now.F?.p==null && PM.now.L?.p==null) throw new Error('CLOB sin precios');
+}
+const pmTokens = () => [...new Set([PM.tok.F, PM.tok.L, ...pmMarkets().map(tok0)].filter(Boolean))];
+// 1) conexión directa a Polymarket
+async function pmDirect(){
+  // Gamma: descubrimiento + volumen/liquidez; cada 5 min, con parámetro anti-caché (Gamma manda max-age=300 al CDN)
+  if(!PM.gammaAt || Date.now()-PM.gammaAt > PM.GAMMA_S*1000){
+    const slugs=[PM.presSlug, PM.marginSlug, ...Object.values(PM.gov)];
+    try{ pmIngestEvents(await pmJSON(`${PM.gamma}/events?${slugs.map(s=>'slug='+encodeURIComponent(s)).join('&')}&_=${Date.now()}`)); PM.gammaAt=Date.now(); }
+    catch(e){ if(PM.mode!=='direct' || !Object.keys(PM.ev).length) throw e; }   // si no estamos en directo, no insistimos con CLOB (ahorra otros 6 s)
+  }
+  if(!PM.hist) { try{ await pmLoadHistory(); }catch(e){ console.warn('PM historial', e); } }
+  // CLOB: precios en vivo de todos los tokens en 2 llamadas (POST /midpoints y /last-trades-prices)
+  const toks=pmTokens();
+  const [mids, lts] = await Promise.all([pmPost('/midpoints', toks).catch(e=>({__err:e})), pmPost('/last-trades-prices', toks).catch(e=>({__err:e}))]);
+  if(mids.__err && lts.__err) throw mids.__err;
+  pmIngestPrices(toks, mids, lts, Date.now());
+  if(Q.get('pmtest')==='stale' && PM.last && (PM.okN=(PM.okN||0)+1)>2) throw new Error('fallo simulado (pmtest=stale)');
+  return toks.length;
+}
+// 2) respaldo: pm.json en el mismo dominio (lo genera una GitHub Action cada ~5 min)
+async function pmSnapshot(){
+  const d=await pmFetch(`pm.json?_=${Date.now()}`, {}, false);
+  if(!d || !d.generated_at || !d.mids) throw new Error('pm.json incompleto');
+  if(d.generated_at===PM.snapGen) return 0;                  // misma copia que la vez anterior
+  pmIngestEvents(d.events); if(d.tok){ PM.tok.F=d.tok.F||PM.tok.F; PM.tok.L=d.tok.L||PM.tok.L; }
+  if(!PM.hist && d.history){ for(const k of ['F','L']) PM.ser[k]=(d.history[k]||[]).map(h=>({t:h.t*1000,p:h.p*100})); PM.hist=true; }
+  const t=Date.parse(d.generated_at), toks=pmTokens();
+  pmIngestPrices(toks, d.mids, d.lasts, t);
+  PM.snapGen=d.generated_at; PM.snapAt=new Date(t);
+  return toks.length;
 }
 async function pmRefresh(){
-  if(PM.busy) return; PM.busy=true; PM.lastTry=Date.now(); PM.nextAt=Date.now()+PM.REFRESH_S*1000;
+  if(PM.busy) return; PM.busy=true; PM.lastTry=Date.now(); PM.nextAt=Date.now()+PM.REFRESH_S*1000; pmStatus();
   try{
-    // Gamma: solo descubrimiento + volumen/liquidez; cada 5 min, con parámetro anti-caché (Gamma manda max-age=300 al CDN)
-    if(!PM.gammaAt || Date.now()-PM.gammaAt > PM.GAMMA_S*1000){
+    try{
+      const n=await pmDirect();
+      PM.mode='direct'; PM.dErr=null; PM.err=null; PM.ok=true; PM.last=new Date();
+      if(PM.TEST) console.log(`[pmtest] DIRECTO ok ${bogota(PM.last)} · Flávio ${PM.now.F?.p?.toFixed(2)} (${PM.now.F?.src}, CLOB) · Lula ${PM.now.L?.p?.toFixed(2)} (${PM.now.L?.src}, CLOB) · tokens ${n} · sin cambio ${PM.nSame}/${PM.nTot} · gamma hace ${Math.round((Date.now()-PM.gammaAt)/1000)}s`);
+    }catch(de){
+      PM.dErr=de.message||String(de); PM.blockN=(PM.blockN||0)+1;
+      if(PM.TEST) console.log('[pmtest] directo FALLÓ: '+PM.dErr+' → probando pm.json');
       try{
-        const slugs=[PM.presSlug, PM.marginSlug, ...Object.values(PM.gov)];
-        const evs=await pmJSON(`${PM.gamma}/events?${slugs.map(s=>'slug='+encodeURIComponent(s)).join('&')}&_=${Date.now()}`);
-        for(const e of evs) PM.ev[e.slug]=e;
-        if(PM.ev[PM.presSlug]) pmFindPres(PM.ev[PM.presSlug]);
-        PM.gammaAt=Date.now();
-      }catch(e){ if(!PM.gammaAt) PM.gErr='Gamma: '+e.message; }
+        const n=await pmSnapshot();
+        PM.mode='snap'; PM.err=null; PM.ok=true; PM.last=new Date();
+        if(PM.TEST) console.log(`[pmtest] COPIA pm.json ok · generada ${PM.snapGen} (${bogota(PM.snapAt)}) · ${n?'nueva':'sin cambios desde la anterior'} · Flávio ${PM.now.F?.p?.toFixed(2)} · Lula ${PM.now.L?.p?.toFixed(2)}`);
+      }catch(se){
+        PM.err=`directo: ${PM.dErr} · copia pm.json: ${se.message||se}`;
+        if(PM.TEST) console.log('[pmtest] ERROR '+PM.err);
+      }
     }
-    if(!PM.hist) { try{ await pmLoadHistory(); }catch(e){ console.warn('PM historial', e); } }
-    // CLOB: precios en vivo de todos los tokens en 2 llamadas (POST /midpoints y /last-trades-prices)
-    const toks=[...new Set([PM.tok.F, PM.tok.L, ...pmMarkets().map(tok0)].filter(Boolean))];
-    const [mids, lts] = await Promise.all([pmPost('/midpoints', toks).catch(e=>({__err:e})), pmPost('/last-trades-prices', toks).catch(e=>({__err:e}))]);
-    if(mids.__err && lts.__err) throw mids.__err;
-    const lastMap={}; if(Array.isArray(lts)) for(const x of lts) lastMap[x.token_id]=+x.price*100;
-    const t=Date.now(); let same=0, tot=0;
-    for(const tk of toks){
-      const mid = mids && !mids.__err && mids[tk]!=null ? +mids[tk]*100 : null, last = lastMap[tk]!=null ? lastMap[tk] : null;
-      const p = mid!=null ? mid : last; if(p==null) continue;
-      const old = PM.px[tk]?.p; PM.prev[tk]=old;
-      PM.px[tk]={mid, last, p, src: mid!=null?'punto medio':'último trade', same: old!=null && Math.abs(old-p)<1e-9, d: old!=null ? p-old : null};
-      if(old!=null){ tot++; if(PM.px[tk].same) same++; }
-    }
-    PM.nSame=same; PM.nTot=tot;
-    for(const k of ['F','L']){ const x=PM.px[PM.tok[k]]; if(!x) continue; PM.now[k]=x; PM.ser[k].push({t, p:x.p}); if(PM.open[k]==null) PM.open[k]=x.p; }
-    if(PM.now.F?.p==null && PM.now.L?.p==null) throw new Error('CLOB sin precios');
-    if(Q.get('pmtest')==='stale' && PM.last && (PM.okN=(PM.okN||0)+1)>2) throw new Error('fallo simulado (pmtest=stale)');
-    PM.ok=true; PM.err=null; PM.last=new Date();
-    if(PM.TEST) console.log(`[pmtest] ok ${bogota(PM.last)} · Flávio ${PM.now.F?.p?.toFixed(2)} (${PM.now.F?.src}, CLOB) · Lula ${PM.now.L?.p?.toFixed(2)} (${PM.now.L?.src}, CLOB) · tokens ${toks.length} · sin cambio ${same}/${tot} · gamma hace ${Math.round((Date.now()-PM.gammaAt)/1000)}s`);
-  }catch(e){ PM.err=e.message||String(e); if(!PM.last) PM.ok=false; if(PM.TEST) console.log('[pmtest] ERROR '+PM.err); }
-  finally{ PM.busy=false; PM.nextAt=Date.now()+PM.REFRESH_S*1000; }
+  }finally{ PM.busy=false; PM.tried=true; PM.nextAt=Date.now()+PM.REFRESH_S*1000; }
   renderPM();
-  if(PM.TEST) console.log('[pmtest] cabecera: '+($('pmupd')?.textContent||''));
+  if(PM.TEST) console.log('[pmtest] cabecera: '+($('pmupd')?.textContent||'') + ' || panel: '+(($('pmbody')?.textContent||'').slice(0,160)));
 }
 function pmAt(ser, t){ let best=null; for(const x of ser){ if(x.t<=t) best=x; else break; } return best; }
 function fmtD(d){ if(d==null||isNaN(d)) return '–'; const s=(d>0?'+':d<0?'−':'±')+Math.abs(d).toFixed(1)+' pts'; return `<span class="${d>0.05?'up':d<-0.05?'dn':''}">${s}</span>`; }
@@ -525,7 +570,8 @@ function pmChart(){
 }
 function renderPM(){
   const el=$('pmbody'); if(!el) return;
-  if(!PM.ok){ el.innerHTML=`<p class="warn"><b>Polymarket no disponible</b> en este momento${PM.err?` <span class="same">(${PM.err})</span>`:''}. Se reintenta cada ${PM.REFRESH_S} s; el resto de la página (TSE) no se ve afectado.</p>`; $('pmupd').textContent=''; return; }
+  if(!PM.ok && !PM.tried){ el.innerHTML=`<p class="same">Cargando Polymarket… (conexión directa; si no responde en ${PM.TIMEOUT_MS/1000} s se usa la copia en GitHub)</p>`; pmStatus(); return; }
+  if(!PM.ok){ el.innerHTML=`<p class="warn"><b>Polymarket no disponible</b> en este momento <span class="same">(${PM.err||'error desconocido'})</span>. Se reintenta cada ${PM.REFRESH_S} s; el resto de la página (TSE) no se ve afectado.</p>`; $('pmupd').textContent=''; return; }
   const ev=PM.ev[PM.presSlug]||{}, money=v=>v==null||isNaN(+v)?'–':'US$ '+Math.round(+v).toLocaleString('es-CO');
   const now=Date.now();
   const card=(k,nm,col)=>{ const n=PM.now[k]||{}, h=pmAt(PM.ser[k], now-36e5);
@@ -556,10 +602,13 @@ function renderPM(){
 }
 const hhmmss = d => d.toLocaleTimeString('es-CO',{timeZone:'America/Bogota',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
 function pmStatus(){
-  const u=$('pmupd'); if(!u || !PM.last) return;
-  const nx=Math.max(0,Math.round((PM.nextAt-Date.now())/1000));
-  if(PM.err) u.innerHTML=`<span class="warn">⚠ sin actualizar desde ${hhmmss(PM.last)} (hora Bogotá) · ${PM.err}</span> · reintento en ${nx}s`;
-  else u.innerHTML=`Actualizado ${hhmmss(PM.last)} (hora Bogotá) · próxima en ${PM.busy?'…':nx+'s'}`;
+  const u=$('pmupd'); if(!u) return;
+  const nx=Math.max(0,Math.round((PM.nextAt-Date.now())/1000)), nxt=PM.busy?'consultando…':`próxima en ${nx}s`;
+  if(!PM.last){ u.innerHTML = PM.busy ? 'conectando…' : (PM.err?`<span class="warn">reintento en ${nx}s</span>`:''); return; }
+  if(PM.err) u.innerHTML=`<span class="warn">⚠ sin actualizar desde ${hhmmss(PM.last)} (hora Bogotá) · ${PM.err}</span> · ${nxt}`;
+  else if(PM.mode==='snap'){ const age=Math.round((Date.now()-PM.snapAt)/60000);
+    u.innerHTML=`vía copia en GitHub (cada ~5 min) · datos de ${hhmmss(PM.snapAt)} (hora Bogotá)${age>=20?` <span class="warn">⚠ copia de hace ${age} min</span>`:''} · <span title="${PM.dErr||''}">directo no disponible: ${PM.dErr}</span> · ${nxt}`; }
+  else u.innerHTML=`Actualizado ${hhmmss(PM.last)} (hora Bogotá) · directo · ${nxt}`;
 }
 $('pmZ').onclick=()=>{PM.zoom=true;$('pmZ').classList.add('on');$('pmF').classList.remove('on');renderPM();};
 $('pmF').onclick=()=>{PM.zoom=false;$('pmF').classList.add('on');$('pmZ').classList.remove('on');renderPM();};
