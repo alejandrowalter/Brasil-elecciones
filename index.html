@@ -85,6 +85,17 @@ footer a{color:inherit}
 #pm .note{font-size:11.5px;color:var(--mut);margin-top:8px;line-height:1.45}
 #pm .nochg{color:var(--mut);font-weight:500;font-size:11.5px}
 #pm h3{font-size:13px;margin:12px 0 6px}
+.pmodebar{margin:0 0 8px}
+.pmodebar button{padding:6px 10px}
+#pchips{margin:0 0 6px;display:flex;flex-wrap:wrap;gap:4px 0}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}
+.two .bar{height:8px}
+.two .row{font-size:12.5px}
+.rnd{font-size:12px;color:var(--mut);font-weight:600;margin:0 0 2px}
+.voltb{display:inline-block;background:#111;color:#fff;border-radius:4px;padding:0 5px;font-size:11px;font-weight:700}
+.dpos{color:#15803d;font-weight:600}.dneg{color:#b91c1c;font-weight:600}
+#tP td{white-space:nowrap}
+@media(max-width:520px){#tP .tnm{display:none}#tP td,#tP th{padding:6px 4px}}
 label.chk{font-size:12.5px;color:var(--mut);display:inline-flex;gap:5px;align-items:center;cursor:pointer}
 </style>
 </head>
@@ -108,6 +119,8 @@ label.chk{font-size:12.5px;color:var(--mut);display:inline-flex;gap:5px;align-it
         <span class="toggle"><button id="bP" class="on">Presidente</button><button id="bG">Gobernador</button></span>
       </span>
     </h2>
+    <div class="toggle pmodebar" id="pmodebar"><button data-m="2T">2ª vuelta</button><button data-m="1T">1ª vuelta</button><button data-m="CHG">Cambio 1ª→2ª</button></div>
+    <div id="pchips"></div>
     <div class="mapwrap"><svg id="map" viewBox="0 0 1000 894" role="img" aria-label="Mapa de Brasil por estados"></svg><div id="tip"></div></div>
     <div class="legend" id="legend"></div>
   </section>
@@ -126,7 +139,7 @@ label.chk{font-size:12.5px;color:var(--mut);display:inline-flex;gap:5px;align-it
   </section>
 
   <section class="card">
-    <h2>Presidente por estado <span class="same">ganador · margen · % apurado · 2022</span></h2>
+    <h2>Presidente por estado <span class="same">1ª vuelta · 2ª vuelta (líder, margen, apurado) · Δ pts · 2022</span></h2>
     <div class="scroll"><table id="tP"></table></div>
   </section>
   <section class="card">
@@ -148,8 +161,10 @@ const DEMO = Q.get('demo');              // '1t' = usar datos reales de la 1ª v
 let ROOT = 'https://resultados.tse.jus.br/oficial';
 if (Q.get('proxy')) ROOT = (Q.get('proxy') === '1' ? '' : Q.get('proxy').replace(/\/$/, '')) + '/oficial';
 const ELE = DEMO === '1t'
-  ? {pres:'6257', gov:'6259', gov1:'6259', label:'DEMO · datos reales 1ª vuelta (4 oct 2026)'}
-  : {pres:'6258', gov:'6260', gov1:'6259', label:'2ª vuelta · 25 oct 2026'};
+  ? {pres:'6257', pres1:'6257', gov:'6259', gov1:'6259', label:'DEMO · datos reales 1ª vuelta (4 oct 2026)'}
+  : DEMO === '2t'   // 2ª vuelta SIMULADA a partir de la 1ª vuelta real (para probar la comparación)
+  ? {pres:'6258', pres1:'6257', gov:'6260', gov1:'6259', sim:true, label:'DEMO · 2ª vuelta SIMULADA (base: 1ª vuelta real)'}
+  : {pres:'6258', pres1:'6257', gov:'6260', gov1:'6259', label:'2ª vuelta · 25 oct 2026'};
 const REFRESH_S = +(Q.get('refresh') || 60);
 const UFS = ['ac','al','am','ap','ba','ce','df','es','go','ma','mg','ms','mt','pa','pb','pe','pi','pr','rj','rn','ro','rr','rs','sc','se','sp','to'];
 const RUNOFF_FALLBACK = ['ac','am','df','es','rn','to']; // de ele-c.json (eleição 6260) al 24/10/2026
@@ -210,7 +225,7 @@ function mapFill(r, live, defined){
 const camp = nm => norm(nm)==='LULA' ? 'LULA' : (norm(nm).includes('BOLSONARO') ? 'BOLSONARO' : nm);
 
 /* ===== Estado ===== */
-const S = {view:'P', sel:null, pres:{}, presBR:null, gov:{}, gov1:{}, runoff:RUNOFF_FALLBACK, err:[], lastFetch:null};
+const S = {view:'P', pmode:({'1t':'1T',cambio:'CHG'})[Q.get('pres')]||'2T', pres1:{}, pres1BR:null, sel:null, pres:{}, presBR:null, gov:{}, gov1:{}, runoff:RUNOFF_FALLBACK, err:[], lastFetch:null};
 
 async function loadRunoffList(){
   try{
@@ -222,13 +237,51 @@ async function loadRunoffList(){
 async function loadGov1(){ // 1ª vuelta gobernador (resultado final, se carga una vez)
   await Promise.all(UFS.map(async uf=>{ try{ S.gov1[uf]=parseRes(await getJSON(`/ele2026/${ELE.gov1}/dados/${uf}/${uf}-c0003-e00${ELE.gov1}-u.json`)); }catch(e){ S.err.push(e.message); } }));
 }
+async function loadPres1(){ // 1ª vuelta presidente (resultado final, se carga una vez) — base de la comparación 1ª→2ª
+  const P=ELE.pres1;
+  await Promise.all([
+    getJSON(`/ele2026/${P}/dados/br/br-c0001-e00${P}-u.json`).then(j=>S.pres1BR=parseRes(j)).catch(e=>S.err.push(e.message)),
+    ...UFS.map(uf=>getJSON(`/ele2026/${P}/dados/${uf}/${uf}-c0001-e00${P}-u.json`).then(j=>S.pres1[uf]=parseRes(j)).catch(e=>S.err.push(e.message)))]);
+}
+/* DEMO 2t: 2ª vuelta simulada. Votos de la 1ª vuelta de Lula/Flávio + transferencia de los demás según su bloque
+   (izquierda 85% Lula · derecha 80% Flávio/5% Lula · centro 55% Flávio/30% Lula; el resto a blanco/nulo/abstención),
+   una variación determinista por estado de ±2,5 pts y un conteo que avanza con el tiempo (3 estados sin votos al inicio). */
+const SIM_T0 = Date.now();
+const hash01 = (s,k=0) => { let h=2166136261^k; for(const ch of s){ h^=ch.charCodeAt(0); h=Math.imul(h,16777619); } return ((h>>>0)%10000)/10000; };
+function simPres(){
+  const el=(Date.now()-SIM_T0)/60000, PEND=['rr','pi','sc'], br={L:0,F:0,st:0,ts:0,te:0,vb:0,vn:0};
+  let Lc=null, Fc=null;
+  for(const uf of UFS){
+    const r1=S.pres1[uf]; if(!r1) continue;
+    const L1=r1.cands.find(c=>camp(c.nm)==='LULA'), F1=r1.cands.find(c=>camp(c.nm)==='BOLSONARO');
+    if(!L1||!F1) continue; Lc=Lc||L1; Fc=Fc||F1;
+    let L=L1.votes, F=F1.votes;
+    for(const c of r1.cands){ if(c===L1||c===F1) continue; const b=bloc(c.party);
+      if(b==='I'){ L+=c.votes*0.85; } else if(b==='D'){ F+=c.votes*0.80; L+=c.votes*0.05; } else { F+=c.votes*0.55; L+=c.votes*0.30; } }
+    const sw=(hash01(uf,2)-0.5)*0.05*(L+F); L+=sw; F-=sw;
+    const base = PEND.includes(uf) ? -20 : 30+hash01(uf,3)*70;
+    const pst = Math.max(0, Math.min(100, base + el*6));
+    const k=pst/100, Lv=Math.round(L*k), Fv=Math.round(F*k), vv=Lv+Fv, ts=r1.ts||1000, st=Math.round(ts*k);
+    const mk=(c,v)=>({nm:c.nm, full:c.full, n:c.n, party:c.party, votes:v, pct:vv?100*v/vv:0, st:'', eleito:false});
+    const cands=[mk(L1,Lv), mk(F1,Fv)].sort((a,b)=>b.votes-a.votes||a.nm.localeCompare(b.nm));
+    S.pres[uf]={cands, pst, st, ts, tf:pst>=100, time:new Date(), tdt:null, eleitores:r1.eleitores, comp:Math.round(r1.comp*k), pcomp:r1.pcomp, abst:Math.round(r1.abst*k), pabst:r1.pabst,
+      validos:vv, brancos:Math.round(r1.brancos*k), pbrancos:r1.pbrancos, nulos:Math.round(r1.nulos*k), pnulos:r1.pnulos, total:vv};
+    br.L+=Lv; br.F+=Fv; br.st+=st; br.ts+=ts; br.te+=r1.eleitores; br.vb+=Math.round(r1.brancos*k); br.vn+=Math.round(r1.nulos*k);
+  }
+  if(!Lc) return;
+  const vv=br.L+br.F, mk=(c,v)=>({nm:c.nm, full:c.full, n:c.n, party:c.party, votes:v, pct:vv?100*v/vv:0, st:'', eleito:false});
+  const pst=br.ts?100*br.st/br.ts:0;
+  S.presBR={cands:[mk(Lc,br.L), mk(Fc,br.F)].sort((a,b)=>b.votes-a.votes), pst, st:br.st, ts:br.ts, tf:pst>=100, time:new Date(), eleitores:br.te, comp:0, pcomp:0, abst:0, pabst:S.pres1BR?.pabst||0,
+    validos:vv, brancos:br.vb, pbrancos:vv?100*br.vb/(vv+br.vb+br.vn):0, nulos:br.vn, pnulos:vv?100*br.vn/(vv+br.vb+br.vn):0, total:vv+br.vb+br.vn};
+}
 async function refresh(){
   S.err=[];
   const P = ELE.pres, G = ELE.gov;
-  const jobs = [
+  const jobs = ELE.sim ? [] : [
     getJSON(`/ele2026/${P}/dados/br/br-c0001-e00${P}-u.json`).then(j=>S.presBR=parseRes(j)).catch(e=>S.err.push(e.message)),
     ...UFS.map(uf=>getJSON(`/ele2026/${P}/dados/${uf}/${uf}-c0001-e00${P}-u.json`).then(j=>S.pres[uf]=parseRes(j)).catch(e=>S.err.push(e.message)))
   ];
+  if(ELE.sim) simPres();
   if(DEMO!=='1t') jobs.push(...S.runoff.map(uf=>getJSON(`/ele2026/${G}/dados/${uf}/${uf}-c0003-e00${G}-u.json`).then(j=>S.gov[uf]=parseRes(j)).catch(e=>S.err.push(e.message))));
   await Promise.all(jobs);
   S.lastFetch = new Date();
@@ -244,6 +297,18 @@ function presState(uf){
   const defined = live && (r.pst>=100 || r.tf);           // estado 100% apurado
   return {r, b, live, lead, m: live?margin(r):0, flip, defined};
 }
+// comparación 1ª → 2ª vuelta por estado
+function cmpState(uf){
+  const r1=S.pres1[uf], s=presState(uf), w1=hasVotes(r1)?r1.cands[0]:null;
+  const pc=(r,k)=>r?.cands?.find(c=>camp(c.nm)===k)?.pct;
+  const l1=pc(r1,'LULA'), f1=pc(r1,'BOLSONARO'), l2=s.live?pc(s.r,'LULA'):null, f2=s.live?pc(s.r,'BOLSONARO'):null;
+  let st='pend';
+  if(s.live && w1) st = camp(s.lead.nm)===camp(w1.nm) ? 'same' : (camp(s.lead.nm)==='LULA' ? 'toL' : camp(s.lead.nm)==='BOLSONARO' ? 'toF' : 'other');
+  return {r1, w1, s, st, l1, f1, l2, f2, dL: l2!=null&&l1!=null?l2-l1:null, dF: f2!=null&&f1!=null?f2-f1:null};
+}
+const shortNm = nm => camp(nm)==='LULA' ? 'Lula' : camp(nm)==='BOLSONARO' ? 'Flávio' : nm.split(' ').map(w=>w[0]+w.slice(1).toLowerCase()).join(' ');
+const fmtPts = d => d==null||isNaN(d) ? '–' : `<span class="${d>0.05?'dpos':d<-0.05?'dneg':''}">${d>0?'+':d<0?'−':'±'}${Math.abs(d).toFixed(1)}</span>`;
+const CHG_TXT = {same:'mismo ganador', toL:'volteó a Lula', toF:'volteó a Flávio', other:'volteó', pend:'pendiente (sin votos en 2ª)'};
 function govState(uf){
   const b=BASE22.gov[uf.toUpperCase()];
   const isRun = DEMO==='1t' ? (S.gov1[uf]?.cands||[]).some(c=>/2º turno/.test(c.st)) : S.runoff.includes(uf);
@@ -292,7 +357,12 @@ function showTip(uf,ev){
 function tipHTML(uf){
   const name=MAP.uf[uf.toUpperCase()].n;
   if(S.view==='P'){
-    const s=presState(uf);
+    const s=presState(uf), c=cmpState(uf);
+    const t1 = c.w1 ? `1ª vuelta: <b>${shortNm(c.w1.nm)}</b> ${fmtP(c.w1.pct,1)}` : '1ª vuelta: –';
+    if(DEMO!=='1t' && S.pmode!=='2T'){
+      if(!s.live) return `<b>${name}</b><br>${t1}<br>2ª vuelta: esperando resultados`;
+      return `<b>${name}</b><br>${t1}<br>2ª vuelta: <b>${shortNm(s.lead.nm)}</b> ${fmtP(s.lead.pct,1)} (+${s.m.toFixed(1)}) · ${fmtP(s.r.pst,0)} apurado<br>${c.st==='same'?'Mismo ganador':'<b>⇄ '+CHG_TXT[c.st].toUpperCase()+'</b>'}${s.defined?'':' (provisional)'}<br>Δ Lula ${c.dL==null?'–':(c.dL>0?'+':'')+c.dL.toFixed(1)} · Δ Flávio ${c.dF==null?'–':(c.dF>0?'+':'')+c.dF.toFixed(1)} pts`;
+    }
     if(!s.live) return `<b>${name}</b><br>Esperando resultados${s.b?`<br>2022: ${s.b.w==='LULA'?'Lula':'J. Bolsonaro'} ${fmtP(Math.max(s.b.lula,s.b.bolsonaro),1)}`:''}`;
     return `<b>${name}</b> · ${fmtP(s.r.pst,1)} apurado<br>${s.r.cands.slice(0,2).map(c=>`${c.nm}: ${fmtP(c.pct)}`).join('<br>')}<br>2022: ${s.b.w==='LULA'?'Lula':'J. Bolsonaro'}${s.flip?' · <b>↻ CAMBIO DE BLOQUE</b>':''}<br>${s.defined?'Definido (100% apurado)':'Aún sin definir'}`;
   }
@@ -307,12 +377,19 @@ function paintMap(){
   for(const uf of UFS){
     const p=$('p-'+uf), h=$('h-'+uf);
     let fill=GRAY, op=1, flip=false, hatch=false;
-    if(S.view==='P'){ const s=presState(uf); fill=mapFill(s.r, s.live, s.defined); flip=s.flip; }
+    let mark='', volt=false;
+    const pm = DEMO==='1t' ? '2T' : S.pmode;
+    if(S.view==='P' && pm==='1T'){ const c=cmpState(uf); fill = c.w1 ? bcolor(bloc(c.w1.party), true) : GRAY; }
+    else if(S.view==='P' && pm==='CHG'){ const c=cmpState(uf);
+      if(c.st==='pend'){ fill=GRAY; hatch=true; }
+      else if(c.st==='same'){ fill=bcolor(bloc(c.s.lead.party), false); op=0.5; }
+      else { fill=bcolor(bloc(c.s.lead.party), true); volt=true; mark=' ⇄'; } }
+    else if(S.view==='P'){ const s=presState(uf); fill=mapFill(s.r, s.live, s.defined); flip=s.flip; }
     else { const s=govState(uf); fill=mapFill(s.r, s.live, s.defined); flip=s.flip; }
     p.setAttribute('fill',fill); p.setAttribute('fill-opacity',op);
-    p.classList.toggle('flip', showFlip && flip); p.classList.toggle('sel', S.sel===uf);
+    p.classList.toggle('flip', (showFlip && flip) || volt); p.classList.toggle('sel', S.sel===uf);
     h.style.display = hatch?'':'none';
-    const t=$('t-'+uf); t.textContent = uf.toUpperCase() + (showFlip&&flip?' ↻':'');
+    const t=$('t-'+uf); t.textContent = uf.toUpperCase() + (showFlip&&flip?' ↻':'') + mark;
   }
   // leyenda
   const sw = c => `<i style="background:${c}"></i>`;
@@ -320,8 +397,26 @@ function paintMap(){
     <span>${sw(BCOL.D.s)}${sw(BCOL.D.p)}Derecha</span><span>${sw(BCOL.C.s)}${sw(BCOL.C.p)}Centro</span><span>${sw(BCOL.I.s)}${sw(BCOL.I.p)}Izquierda</span><span>(fuerte = definido · pastel = va adelante)</span><span>${sw(GRAY)}Sin votos aún (candidatos de bloques distintos)</span>`;
   if(S.view==='P') L+=`<span>Lula (PT) = rojo · Flávio Bolsonaro (PL) = azul · definido = 100% apurado en el estado</span><span><b>↻ / borde punteado</b> = cambio de bloque vs 2022 (Lula vs Jair Bolsonaro, 2ª vuelta)</span>`;
   else L+=`<span>Definido = ganado en 1ª vuelta (4 oct) o 2ª vuelta terminada (100% apurado / "Eleito")</span><span><b>↻ / borde punteado</b> = cambio de <b>bloque</b> vs 2022 (antes marcaba cualquier cambio de partido; el cambio de partido dentro del mismo bloque se ve en la tabla)</span>`;
+  const pm = DEMO==='1t' ? '2T' : S.pmode, chip=(cls,txt,n,st='')=>`<span class="bloc ${cls}" style="${st}">${txt} <b>${n}</b></span>`;
+  let chips='';
+  if(S.view==='P' && pm==='1T'){
+    const n={L:0,F:0,O:0}; for(const uf of UFS){ const c=cmpState(uf); if(c.w1) n[camp(c.w1.nm)==='LULA'?'L':camp(c.w1.nm)==='BOLSONARO'?'F':'O']++; }
+    chips=chip('izq','Lula ganó',n.L)+chip('der','Flávio ganó',n.F)+(n.O?chip('pend','Otro',n.O):'');
+    L=`<span class="lmain">1ª vuelta (4 oct, resultado final): color del ganador en cada estado</span><span>${sw(BCOL.I.s)}Lula (PT)</span><span>${sw(BCOL.D.s)}Flávio Bolsonaro (PL)</span><span>${sw(BCOL.C.s)}otro candidato: color de su bloque</span>`;
+  } else if(S.view==='P' && pm==='CHG'){
+    const n={same:0,toF:0,toL:0,other:0,pend:0}; for(const uf of UFS) n[cmpState(uf).st]++;
+    chips=chip('pend','Mismo ganador',n.same)+chip('der','Volteó a Flávio',n.toF)+chip('izq','Volteó a Lula',n.toL)+(n.other?chip('pend','Volteó (otro)',n.other):'')+chip('pend','Pendiente',n.pend,'background:repeating-linear-gradient(45deg,#e5e7eb 0 4px,#f8fafc 4px 8px)');
+    L=`<span class="lmain">Cambio de ganador entre la 1ª vuelta (4 oct) y la 2ª vuelta (líder actual)</span><span>${sw(BCOL.D.s)}<b>⇄</b> volteó a Flávio</span><span>${sw(BCOL.I.s)}<b>⇄</b> volteó a Lula</span><span><i style="background:${BCOL.D.p};opacity:.5"></i><i style="background:${BCOL.I.p};opacity:.5"></i>mismo ganador (atenuado, color del ganador)</span><span><i style="background:repeating-linear-gradient(45deg,#d7dbe0 0 3px,#fff 3px 5px)"></i>pendiente: sin votos aún en la 2ª vuelta</span><span><b>⇄ / borde punteado</b> = volteó · provisional hasta 100% apurado</span>`;
+  } else if(S.view==='P'){
+    const n={L:0,F:0,P:0}; for(const uf of UFS){ const s=presState(uf); if(!s.live) n.P++; else n[camp(s.lead.nm)==='LULA'?'L':'F']++; }
+    chips=chip('izq',DEMO==='1t'?'Lula ganó':'Lula adelante',n.L)+chip('der',DEMO==='1t'?'Flávio ganó':'Flávio adelante',n.F)+(n.P?chip('pend','Sin votos',n.P):'');
+  }
+  $('pchips').innerHTML=chips;
+  $('pmodebar').style.display = (S.view==='P' && DEMO!=='1t') ? '' : 'none';
+  document.querySelectorAll('#pmodebar button').forEach(b=>b.classList.toggle('on', b.dataset.m===S.pmode));
+  $('flipchk').parentElement.style.display = (S.view==='P' && pm!=='2T') ? 'none' : '';
   $('legend').innerHTML=L;
-  $('maptitle').textContent = S.view==='P' ? 'Mapa · Presidente (líder por estado)' : 'Mapa · Gobernador (bloque líder/ganador)';
+  $('maptitle').textContent = S.view==='G' ? 'Mapa · Gobernador (bloque líder/ganador)' : pm==='1T' ? 'Mapa · Presidente · 1ª vuelta (ganador por estado)' : pm==='CHG' ? 'Mapa · Presidente · cambio 1ª→2ª vuelta' : DEMO==='1t' ? 'Mapa · Presidente (ganador por estado)' : 'Mapa · Presidente · 2ª vuelta (líder por estado)';
 }
 function candCard(c){
   const col=ccolor(c);
@@ -352,8 +447,16 @@ function renderDetail(){
   const uf=S.sel; if(!uf) return;
   const name=MAP.uf[uf.toUpperCase()].n, p=presState(uf), g=govState(uf);
   let h=`<h3 style="margin:0 0 6px">${name} (${uf.toUpperCase()})</h3>`;
-  h+=`<p style="margin:4px 0"><b>Presidente</b> ${p.r?`· ${fmtP(p.r.pst,1)} apurado`:''}</p>`;
-  h+= p.live ? bars(p.r) : '<p class="same">Esperando resultados.</p>';
+  if(DEMO==='1t'){
+    h+=`<p style="margin:4px 0"><b>Presidente</b> ${p.r?`· ${fmtP(p.r.pst,1)} apurado`:''}</p>`;
+    h+= p.live ? bars(p.r) : '<p class="same">Esperando resultados.</p>';
+  } else {
+    const c=cmpState(uf), top=r=>({...r, cands:r.cands.slice(0,3)});
+    h+=`<p style="margin:4px 0"><b>Presidente</b> · 1ª vs 2ª vuelta ${c.st!=='pend'?(c.st==='same'?'<span class="same">· mismo ganador</span>':`<span class="voltb">⇄ ${CHG_TXT[c.st].toUpperCase()}</span>${p.defined?'':' <span class="same">(provisional)</span>'}`):''}</p>
+      <div class="two"><div><div class="rnd">1ª vuelta · 4 oct${c.r1?` · ${fmtP(c.r1.pst,0)}`:''}</div>${c.r1&&hasVotes(c.r1)?bars(top(c.r1)):'<p class="same">Sin datos.</p>'}</div>
+      <div><div class="rnd">2ª vuelta${p.r?` · ${fmtP(p.r.pst,1)} apurado`:''}${ELE.sim?' · SIMULADA':''}</div>${p.live?bars(p.r):'<p class="same">Esperando resultados.</p>'}</div></div>
+      ${p.live?`<p class="same" style="margin:2px 0 4px">Margen 2ª: +${p.m.toFixed(1)} pts · Lula ${c.l1!=null?fmtP(c.l1,1):'–'} → ${fmtP(c.l2,1)} (${fmtPts(c.dL)} pts) · Flávio ${c.f1!=null?fmtP(c.f1,1):'–'} → ${fmtP(c.f2,1)} (${fmtPts(c.dF)} pts)</p>`:''}`;
+  }
   if(p.b) h+=`<p class="same">2022 (2ª vuelta): Lula ${fmtP(p.b.lula)} · J. Bolsonaro ${fmtP(p.b.bolsonaro)} ${p.flip?'<span class="flipb">↻ CAMBIO DE BLOQUE</span>':''}</p>`;
   const st = g.isRun ? (DEMO==='1t'?'1ª vuelta · va a 2ª vuelta':'2ª vuelta hoy') : 'Decidido en 1ª vuelta (4 oct)';
   h+=`<p style="margin:12px 0 4px"><b>Gobernador</b> · ${st}${g.r&&g.isRun&&DEMO!=='1t'?` · ${fmtP(g.r.pst,1)} apurado`:''}</p>`;
@@ -362,11 +465,12 @@ function renderDetail(){
   $('detail').innerHTML=h;
 }
 function renderTables(){
-  let rows=UFS.map(uf=>{const s=presState(uf); const name=MAP.uf[uf.toUpperCase()].n;
-    const w = s.live?`<span class="dot" style="background:${ccolor(s.lead)}"></span>${s.lead.nm} ${fmtP(s.lead.pct,1)}`:'<span class="same">esperando</span>';
-    return `<tr class="clk" data-uf="${uf}"><td><b>${uf.toUpperCase()}</b> <span class="same">${name}</span></td><td>${w}</td><td>${s.live?'+'+s.m.toFixed(s.m<1?2:1):''}</td><td>${s.r?fmtP(s.r.pst,0):'–'}</td><td>${s.b.w==='LULA'?'Lula':'J. Bolsonaro'}</td><td>${s.flip?'<span class="flipb">↻ CAMBIO</span>':''}</td></tr>`;}).join('');
-  const lead={}; for(const uf of UFS){const s=presState(uf); if(s.live) lead[s.lead.nm]=(lead[s.lead.nm]||0)+1;}
-  $('tP').innerHTML=`<tr><th>Estado</th><th>Líder</th><th>Margen</th><th>Apurado</th><th>2022</th><th></th></tr>${rows}`;
+  let rows=UFS.map(uf=>{const s=presState(uf), c=cmpState(uf); const name=MAP.uf[uf.toUpperCase()].n;
+    const w1 = c.w1?`<span class="dot" style="background:${ccolor(c.w1)}"></span>${shortNm(c.w1.nm)} ${fmtP(c.w1.pct,1)}`:'–';
+    const w = s.live?`<span class="dot" style="background:${ccolor(s.lead)}"></span>${shortNm(s.lead.nm)} ${fmtP(s.lead.pct,1)} <span class="same">+${s.m.toFixed(s.m<1?2:1)}</span>`:'<span class="same">esperando</span>';
+    const fl = (c.st==='toL'||c.st==='toF'||c.st==='other') ? `<span class="voltb">⇄ ${c.st==='toL'?'a Lula':c.st==='toF'?'a Flávio':'volteó'}</span>` : '';
+    return `<tr class="clk" data-uf="${uf}"><td><b>${uf.toUpperCase()}</b> <span class="same tnm">${name.length>12?name.slice(0,11)+'.':name}</span></td><td>${w1}</td><td>${w}</td><td>${s.r?fmtP(s.r.pst,0):'–'}</td><td>${fmtPts(c.dL)} / ${fmtPts(c.dF)}</td><td>${s.b.w==='LULA'?'Lula':'J. Bols.'}</td><td>${fl}${fl&&s.flip?' ':''}${s.flip?'<span class="flipb">↻ 2022</span>':''}</td></tr>`;}).join('');
+  $('tP').innerHTML=`<tr><th>Estado</th><th>1ª vuelta</th><th>2ª vuelta · margen</th><th>Apur.</th><th>Δ Lula / Flávio</th><th>2022</th><th></th></tr>${rows}`;
   const order=[...UFS].sort((a,b)=>{const A=govState(a),B=govState(b); return (B.isRun-A.isRun)||a.localeCompare(b);});
   rows=order.map(uf=>{const s=govState(uf); const name=MAP.uf[uf.toUpperCase()].n;
     const st=s.isRun?`<span class="tag">${DEMO==='1t'?'→ 2ª vuelta':'2ª vuelta'}</span>`:'<span class="tag t1">1ª vuelta</span>';
@@ -400,11 +504,14 @@ function renderHeader(){
   if(S.err.length){
     b.className='banner err'; b.style.display='block';
     b.innerHTML=`<b>⚠ Algunos datos no se pudieron cargar (${S.err.length}).</b> Se reintenta cada ${REFRESH_S}s. Si persiste, usa el proxy local (ver README).<br><span class="same">${S.err.slice(0,3).join(' · ')}</span>`;
+  } else if(ELE.sim){
+    b.style.display='block';
+    b.innerHTML=`<b>🧪 DEMO: 2ª vuelta SIMULADA</b>, no son resultados reales. Se construye con la 1ª vuelta real del TSE (4 oct): votos de Lula y Flávio + transferencia de los demás candidatos según su bloque, una pequeña variación por estado y un conteo que avanza con el tiempo. Sirve para probar la comparación 1ª→2ª (botones sobre el mapa).`;
   } else if(!DEMO && r && !hasVotes(r)){
     const ms=POLLS_CLOSE-Date.now();
     const cd = ms>0 ? `Faltan ${Math.floor(ms/3.6e6)} h ${Math.floor(ms%3.6e6/6e4)} min para el cierre.` : 'Las urnas ya cerraron; el TSE publica los primeros boletines en minutos.';
     b.style.display='block';
-    b.innerHTML=`<b>⏳ Esperando resultados.</b> Las urnas cierran a las <b>17:00 de Brasília = 15:00 de Bogotá</b> (domingo 25 de octubre). ${cd} La página se actualiza sola cada ${REFRESH_S} s.<br><span class="same">Mientras tanto: el mapa de gobernadores ya muestra los 21 estados decididos en 1ª vuelta. ¿Quieres probar con datos reales? Abre <a href="?demo=1t">?demo=1t</a> (resultados de la 1ª vuelta del 4 oct).</span>`;
+    b.innerHTML=`<b>⏳ Esperando resultados.</b> Las urnas cierran a las <b>17:00 de Brasília = 15:00 de Bogotá</b> (domingo 25 de octubre). ${cd} La página se actualiza sola cada ${REFRESH_S} s.<br><span class="same">Mientras tanto: el mapa de gobernadores ya muestra los 21 estados decididos en 1ª vuelta. ¿Quieres probar con datos reales? Abre <a href="?demo=1t">?demo=1t</a> (resultados de la 1ª vuelta del 4 oct) o <a href="?demo=2t&pres=cambio">?demo=2t</a> (2ª vuelta simulada, para ver la comparación 1ª→2ª).</span>`;
   }
 }
 function render(){ renderHeader(); renderNational(); paintMap(); renderTables(); renderDetail(); if(typeof PM!=='undefined') renderPM(); }
@@ -419,13 +526,14 @@ function footer(){
 $('bP').onclick=()=>{S.view='P';$('bP').classList.add('on');$('bG').classList.remove('on');render();};
 $('bG').onclick=()=>{S.view='G';$('bG').classList.add('on');$('bP').classList.remove('on');render();};
 $('flipchk').onchange=render;
-if(Q.get('view')==='gov') $('bG').click();
+document.querySelectorAll('#pmodebar button').forEach(b=>b.onclick=()=>{ S.pmode=b.dataset.m; render(); });
 S.sel = (Q.get('uf')||'').toLowerCase() || null;
 buildMap(); footer();
+if(Q.get('view')==='gov'){ S.view='G'; $('bG').classList.add('on'); $('bP').classList.remove('on'); }  // sin render: los datos aún no cargan
 let left=REFRESH_S, tseBusy=false, tseReady=false;
 async function tseRefresh(){ if(tseBusy||!tseReady) return; tseBusy=true; left=REFRESH_S; try{ await refresh(); } finally { tseBusy=false; } }
 setInterval(()=>{ left--; if(left<=0){ tseRefresh(); } $('hnext').textContent=`· próxima en ${Math.max(0,left)}s`; if(S.presBR&&!DEMO&&!hasVotes(S.presBR)) renderHeader(); },1000);
-(async()=>{ await Promise.all([loadRunoffList(), loadGov1()]); if(Q.get('view')==='gov') S.view='G'; tseReady=true; await tseRefresh(); })();
+(async()=>{ await Promise.all([loadRunoffList(), loadGov1(), loadPres1()]); if(Q.get('view')==='gov') S.view='G'; tseReady=true; await tseRefresh(); })();
 /* ===== Polymarket (mercado de apuestas; APIs públicas con CORS abierto: Access-Control-Allow-Origin: *) ===== */
 const PM = {
   gamma:'https://gamma-api.polymarket.com', clob:'https://clob.polymarket.com',
