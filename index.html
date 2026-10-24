@@ -83,6 +83,7 @@ footer a{color:inherit}
 #pm .mrow{display:grid;grid-template-columns:96px 1fr 48px;gap:6px;align-items:center;font-size:12.5px;margin:3px 0}
 #pm .mrow .b{height:10px;background:#eef0f3;border-radius:5px;overflow:hidden}#pm .mrow .b span{display:block;height:100%}
 #pm .note{font-size:11.5px;color:var(--mut);margin-top:8px;line-height:1.45}
+#pm .nochg{color:var(--mut);font-weight:500;font-size:11.5px}
 #pm h3{font-size:13px;margin:12px 0 6px}
 label.chk{font-size:12.5px;color:var(--mut);display:inline-flex;gap:5px;align-items:center;cursor:pointer}
 </style>
@@ -421,9 +422,10 @@ $('flipchk').onchange=render;
 if(Q.get('view')==='gov') $('bG').click();
 S.sel = (Q.get('uf')||'').toLowerCase() || null;
 buildMap(); footer();
-let left=REFRESH_S;
-setInterval(()=>{ left--; if(left<=0){ left=REFRESH_S; refresh(); } $('hnext').textContent=`· próxima en ${left}s`; if(S.presBR&&!DEMO&&!hasVotes(S.presBR)) renderHeader(); },1000);
-(async()=>{ await Promise.all([loadRunoffList(), loadGov1()]); if(Q.get('view')==='gov') S.view='G'; await refresh(); })();
+let left=REFRESH_S, tseBusy=false, tseReady=false;
+async function tseRefresh(){ if(tseBusy||!tseReady) return; tseBusy=true; left=REFRESH_S; try{ await refresh(); } finally { tseBusy=false; } }
+setInterval(()=>{ left--; if(left<=0){ tseRefresh(); } $('hnext').textContent=`· próxima en ${Math.max(0,left)}s`; if(S.presBR&&!DEMO&&!hasVotes(S.presBR)) renderHeader(); },1000);
+(async()=>{ await Promise.all([loadRunoffList(), loadGov1()]); if(Q.get('view')==='gov') S.view='G'; tseReady=true; await tseRefresh(); })();
 /* ===== Polymarket (mercado de apuestas; APIs públicas con CORS abierto: Access-Control-Allow-Origin: *) ===== */
 const PM = {
   gamma:'https://gamma-api.polymarket.com', clob:'https://clob.polymarket.com',
@@ -432,7 +434,7 @@ const PM = {
        es:'espirito-santo-governor-election-winner-20260611183840001', rn:'rio-grande-do-norte-governor-election-winner', to:'tocantins-governor-election-winner'},
   // ids de respaldo (se re-descubren desde Gamma en cada carga)
   tok:{F:'109876868437950584369987384406356259939519193117253465815665152916226511121427', L:'30630994248667897740988010928640156931882346081873066002335460180076741328029'},
-  REFRESH_S:30, zoom:true, ser:{F:[],L:[]}, open:{}, now:{}, ev:{}, ok:false, err:null, last:null, hist:false
+  REFRESH_S:Q.get('pmtest')?5:30, TEST:!!Q.get('pmtest'), GAMMA_S:300, zoom:true, ser:{F:[],L:[]}, open:{}, now:{}, ev:{}, px:{}, prev:{}, ok:false, err:null, last:null, lastTry:0, nextAt:0, busy:false, gammaAt:0, hist:false, nSame:0, nTot:0
 };
 const pmURL = s => 'https://polymarket.com/event/'+s;
 async function pmJSON(u){ const r=await fetch(u,{cache:'no-store'}); if(!r.ok) throw new Error(r.status+' '+u.split('?')[0]); return r.json(); }
@@ -449,24 +451,51 @@ async function pmLoadHistory(){
   }));
   PM.hist=true;
 }
+const tok0 = m => { try{ return JSON.parse(m.clobTokenIds||'[]')[0]||null; }catch(e){ return null; } };
+const pmMarkets = () => [PM.ev[PM.marginSlug], ...Object.values(PM.gov).map(s=>PM.ev[s])].filter(Boolean).flatMap(e=>(e.markets||[]).filter(m=>!m.closed && m.active));
+// precio en % para un mercado de Gamma: CLOB (punto medio, o último trade) si lo hay; si no, el de Gamma (puede tener hasta 5 min de caché)
+const mPrice = m => { const x=PM.px[tok0(m)]; return x&&x.p!=null ? x.p : gPrice(m)*100; };
+async function pmPost(path, toks){
+  const r=await fetch(PM.clob+path,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(toks.map(t=>({token_id:t})))});
+  if(!r.ok) throw new Error(r.status+' '+path); return r.json();
+}
 async function pmRefresh(){
+  if(PM.busy) return; PM.busy=true; PM.lastTry=Date.now(); PM.nextAt=Date.now()+PM.REFRESH_S*1000;
   try{
-    const slugs=[PM.presSlug, PM.marginSlug, ...Object.values(PM.gov)];
-    const evs=await pmJSON(`${PM.gamma}/events?${slugs.map(s=>'slug='+encodeURIComponent(s)).join('&')}`);
-    for(const e of evs) PM.ev[e.slug]=e;
-    if(PM.ev[PM.presSlug]) pmFindPres(PM.ev[PM.presSlug]);
-    if(!PM.hist) { try{ await pmLoadHistory(); }catch(e){ PM.err='historial: '+e.message; } }
-    const t=Date.now();
-    await Promise.all(['F','L'].map(async k=>{
-      const [mid,lt]=await Promise.all([pmJSON(`${PM.clob}/midpoint?token_id=${PM.tok[k]}`).catch(()=>null), pmJSON(`${PM.clob}/last-trade-price?token_id=${PM.tok[k]}`).catch(()=>null)]);
-      const m=mid&&mid.mid!=null?+mid.mid*100:null, l=lt&&lt.price!=null?+lt.price*100:null;
-      PM.now[k]={mid:m, last:l, p:m!=null?m:l, src:m!=null?'punto medio':'último precio'};
-      if(PM.now[k].p!=null){ PM.ser[k].push({t, p:PM.now[k].p}); if(PM.open[k]==null) PM.open[k]=PM.now[k].p; }
-    }));
+    // Gamma: solo descubrimiento + volumen/liquidez; cada 5 min, con parámetro anti-caché (Gamma manda max-age=300 al CDN)
+    if(!PM.gammaAt || Date.now()-PM.gammaAt > PM.GAMMA_S*1000){
+      try{
+        const slugs=[PM.presSlug, PM.marginSlug, ...Object.values(PM.gov)];
+        const evs=await pmJSON(`${PM.gamma}/events?${slugs.map(s=>'slug='+encodeURIComponent(s)).join('&')}&_=${Date.now()}`);
+        for(const e of evs) PM.ev[e.slug]=e;
+        if(PM.ev[PM.presSlug]) pmFindPres(PM.ev[PM.presSlug]);
+        PM.gammaAt=Date.now();
+      }catch(e){ if(!PM.gammaAt) PM.gErr='Gamma: '+e.message; }
+    }
+    if(!PM.hist) { try{ await pmLoadHistory(); }catch(e){ console.warn('PM historial', e); } }
+    // CLOB: precios en vivo de todos los tokens en 2 llamadas (POST /midpoints y /last-trades-prices)
+    const toks=[...new Set([PM.tok.F, PM.tok.L, ...pmMarkets().map(tok0)].filter(Boolean))];
+    const [mids, lts] = await Promise.all([pmPost('/midpoints', toks).catch(e=>({__err:e})), pmPost('/last-trades-prices', toks).catch(e=>({__err:e}))]);
+    if(mids.__err && lts.__err) throw mids.__err;
+    const lastMap={}; if(Array.isArray(lts)) for(const x of lts) lastMap[x.token_id]=+x.price*100;
+    const t=Date.now(); let same=0, tot=0;
+    for(const tk of toks){
+      const mid = mids && !mids.__err && mids[tk]!=null ? +mids[tk]*100 : null, last = lastMap[tk]!=null ? lastMap[tk] : null;
+      const p = mid!=null ? mid : last; if(p==null) continue;
+      const old = PM.px[tk]?.p; PM.prev[tk]=old;
+      PM.px[tk]={mid, last, p, src: mid!=null?'punto medio':'último trade', same: old!=null && Math.abs(old-p)<1e-9, d: old!=null ? p-old : null};
+      if(old!=null){ tot++; if(PM.px[tk].same) same++; }
+    }
+    PM.nSame=same; PM.nTot=tot;
+    for(const k of ['F','L']){ const x=PM.px[PM.tok[k]]; if(!x) continue; PM.now[k]=x; PM.ser[k].push({t, p:x.p}); if(PM.open[k]==null) PM.open[k]=x.p; }
     if(PM.now.F?.p==null && PM.now.L?.p==null) throw new Error('CLOB sin precios');
+    if(Q.get('pmtest')==='stale' && PM.last && (PM.okN=(PM.okN||0)+1)>2) throw new Error('fallo simulado (pmtest=stale)');
     PM.ok=true; PM.err=null; PM.last=new Date();
-  }catch(e){ PM.err=e.message; if(!PM.last) PM.ok=false; }
+    if(PM.TEST) console.log(`[pmtest] ok ${bogota(PM.last)} · Flávio ${PM.now.F?.p?.toFixed(2)} (${PM.now.F?.src}, CLOB) · Lula ${PM.now.L?.p?.toFixed(2)} (${PM.now.L?.src}, CLOB) · tokens ${toks.length} · sin cambio ${same}/${tot} · gamma hace ${Math.round((Date.now()-PM.gammaAt)/1000)}s`);
+  }catch(e){ PM.err=e.message||String(e); if(!PM.last) PM.ok=false; if(PM.TEST) console.log('[pmtest] ERROR '+PM.err); }
+  finally{ PM.busy=false; PM.nextAt=Date.now()+PM.REFRESH_S*1000; }
   renderPM();
+  if(PM.TEST) console.log('[pmtest] cabecera: '+($('pmupd')?.textContent||''));
 }
 function pmAt(ser, t){ let best=null; for(const x of ser){ if(x.t<=t) best=x; else break; } return best; }
 function fmtD(d){ if(d==null||isNaN(d)) return '–'; const s=(d>0?'+':d<0?'−':'±')+Math.abs(d).toFixed(1)+' pts'; return `<span class="${d>0.05?'up':d<-0.05?'dn':''}">${s}</span>`; }
@@ -503,30 +532,42 @@ function renderPM(){
     return `<div class="pmc" style="border-top:4px solid ${col}"><div class="nm"><b>${nm}</b></div>
       <div class="pc" style="color:${col}">${n.p!=null?fmtP(n.p,1):'–'}</div>
       <div class="chg">${n.src||''}${n.last!=null&&n.mid!=null?` · último trade ${fmtP(n.last,1)}`:''}</div>
-      <div class="chg">1 h: ${h&&n.p!=null?fmtD(n.p-h.p):'–'} · desde que abriste la página: ${PM.open[k]!=null&&n.p!=null?fmtD(n.p-PM.open[k]):'–'}</div></div>`; };
+      <div class="chg">1 h: ${h&&n.p!=null?fmtD(n.p-h.p):'–'} · desde que abriste la página: ${PM.open[k]!=null&&n.p!=null?fmtD(n.p-PM.open[k]):'–'}</div>
+      <div class="chg">vs consulta anterior: ${n.d==null?'–':n.same?'<span class="nochg">= sin cambio</span>':fmtD(n.d)}</div></div>`; };
   let h=`<div class="pmgrid"><div><div class="pmtop">${card('F','Flávio Bolsonaro (PL)','#1b3a8a')}${card('L','Lula (PT)','#c4161c')}</div>
     <div style="margin-top:10px">${pmChart()}</div>
     <div class="note">Mercado <a href="${pmURL(PM.presSlug)}" target="_blank" rel="noopener">«Brazil Presidential Election»</a> · volumen total ${money(ev.volume)} · volumen 24 h ${money(ev.volume24hr)} · liquidez ${money(ev.liquidity)}</div></div><div>`;
   // margen de victoria
   const mv=PM.ev[PM.marginSlug];
-  if(mv){ const ms=(mv.markets||[]).filter(m=>!m.closed && m.active && +m.volume>0).map(m=>({nm:m.groupItemTitle, p:gPrice(m)*100, col:/FLAVIO/.test(norm(m.groupItemTitle))?'#1b3a8a':'#c4161c'}));
+  if(mv){ const ms=(mv.markets||[]).filter(m=>!m.closed && m.active && +m.volume>0).map(m=>({nm:m.groupItemTitle, p:mPrice(m), same:PM.px[tok0(m)]?.same, col:/FLAVIO/.test(norm(m.groupItemTitle))?'#1b3a8a':'#c4161c'}));
     const ord=s=>{const F=/FLAVIO/.test(norm(s)); const n=/12%\+/.test(s)?4:/8-12/.test(s)?3:/4-8/.test(s)?2:1; return F?-n:n;};
     ms.sort((a,b)=>ord(a.nm)-ord(b.nm));
-    h+=`<h3>Margen de victoria en 2ª vuelta <a class="same" href="${pmURL(PM.marginSlug)}" target="_blank" rel="noopener">(mercado ↗)</a></h3>`+ms.map(m=>`<div class="mrow"><span>${m.nm.replace('Lula da Silva','Lula').replace('Flávio Bolsonaro','Flávio')}</span><span class="b"><span style="width:${Math.min(100,m.p)}%;background:${m.col}"></span></span><b style="text-align:right">${fmtP(m.p,m.p<1?1:0)}</b></div>`).join('')+`<div class="note">Volumen ${money(mv.volume)} · liquidez ${money(mv.liquidity)}</div>`; }
+    h+=`<h3>Margen de victoria en 2ª vuelta <a class="same" href="${pmURL(PM.marginSlug)}" target="_blank" rel="noopener">(mercado ↗)</a></h3>`+ms.map(m=>`<div class="mrow"><span>${m.nm.replace('Lula da Silva','Lula').replace('Flávio Bolsonaro','Flávio')}</span><span class="b"><span style="width:${Math.min(100,m.p)}%;background:${m.col}"></span></span><b style="text-align:right" title="${m.same?'sin cambio vs consulta anterior':''}">${fmtP(m.p,m.p<1?1:0)}${m.same?'<span class="nochg"> =</span>':''}</b></div>`).join('')+`<div class="note">Volumen ${money(mv.volume)} · liquidez ${money(mv.liquidity)}</div>`; }
   // gobernadores en 2ª vuelta
   const rows=Object.entries(PM.gov).map(([uf,slug])=>{ const e=PM.ev[slug]; if(!e) return '';
-    const ms=(e.markets||[]).filter(m=>!m.closed && m.active).map(m=>({nm:m.groupItemTitle, p:gPrice(m)*100})).sort((a,b)=>b.p-a.p).slice(0,2);
+    const ms=(e.markets||[]).filter(m=>!m.closed && m.active).map(m=>({nm:m.groupItemTitle, p:mPrice(m), same:PM.px[tok0(m)]?.same})).sort((a,b)=>b.p-a.p).slice(0,2);
     const r=S.gov[uf]||S.gov1[uf]; const party=nm=>{ const c=(r?.cands||[]).find(c=>{const a=norm(c.nm),b=norm(nm); return a.includes(b)||b.includes(a)||a.split(' ')[0]===b.split(' ')[0]&&a.split(' ').slice(-1)[0]===b.split(' ').slice(-1)[0];}); return c?c.party:null; };
-    const cell=m=>{const pa=party(m.nm); return `<span class="dot" style="background:${pa?pcolor(pa):'#8a8f98'}"></span>${m.nm}${pa?` <span class="same">${pa}</span>`:''} <b>${fmtP(m.p,0)}</b>`;};
+    const cell=m=>{const pa=party(m.nm); return `<span class="dot" style="background:${pa?pcolor(pa):'#8a8f98'}"></span>${m.nm}${pa?` <span class="same">${pa}</span>`:''} <b>${fmtP(m.p,0)}</b>${m.same?'<span class="nochg" title="sin cambio vs consulta anterior"> =</span>':''}`;};
     return `<tr><td><b>${uf.toUpperCase()}</b></td><td>${ms.map(cell).join('<br>')}</td><td class="same" style="white-space:nowrap"><a href="${pmURL(slug)}" target="_blank" rel="noopener">${money(e.volume)}</a></td></tr>`; }).join('');
   if(rows) h+=`<h3>Gobernador · estados en 2ª vuelta</h3><table><tr><th>UF</th><th>Favoritos (prob.)</th><th>Volumen</th></tr>${rows}</table><div class="note">Color del punto = bloque del partido (azul derecha, verde centro, rojo izquierda).</div>`;
-  h+=`</div></div><div class="note">⚠ Polymarket es un <b>mercado de apuestas</b>, no un resultado oficial: los precios reflejan lo que apuestan sus usuarios. Candidatos: precio = punto medio del libro (CLOB <code>/midpoint</code>; si no hay, último trade). Margen y gobernadores: precio mostrado por Polymarket (punto medio si el spread ≤ 10¢, si no último trade) vía Gamma. ${PM.err?`<span class="warn">Último intento con error: ${PM.err}</span>`:''}</div>`;
+  h+=`</div></div><div class="note">⚠ Polymarket es un <b>mercado de apuestas</b>, no un resultado oficial: los precios reflejan lo que apuestan sus usuarios. Candidatos: precio = punto medio del libro (CLOB <code>/midpoint</code>; si no hay, último trade). Margen y gobernadores: también CLOB (punto medio de cada resultado; si no hay, último trade); volumen y liquidez vía Gamma (se renueva cada 5 min). «=» / «sin cambio» = mismo precio que en la consulta anterior (mercado quieto, la página sí se actualizó)${PM.nTot?` — ahora ${PM.nSame} de ${PM.nTot} precios sin cambio`:''}.</div>`;
   el.innerHTML=h;
-  $('pmupd').textContent = 'Actualizado ' + bogota(PM.last);
+  pmStatus();
+}
+const hhmmss = d => d.toLocaleTimeString('es-CO',{timeZone:'America/Bogota',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+function pmStatus(){
+  const u=$('pmupd'); if(!u || !PM.last) return;
+  const nx=Math.max(0,Math.round((PM.nextAt-Date.now())/1000));
+  if(PM.err) u.innerHTML=`<span class="warn">⚠ sin actualizar desde ${hhmmss(PM.last)} (hora Bogotá) · ${PM.err}</span> · reintento en ${nx}s`;
+  else u.innerHTML=`Actualizado ${hhmmss(PM.last)} (hora Bogotá) · próxima en ${PM.busy?'…':nx+'s'}`;
 }
 $('pmZ').onclick=()=>{PM.zoom=true;$('pmZ').classList.add('on');$('pmF').classList.remove('on');renderPM();};
 $('pmF').onclick=()=>{PM.zoom=false;$('pmF').classList.add('on');$('pmZ').classList.remove('on');renderPM();};
-pmRefresh(); setInterval(pmRefresh, PM.REFRESH_S*1000);
+// temporizador de 1 s (los navegadores suspenden timers en segundo plano; al volver se refresca de inmediato)
+setInterval(()=>{ if(!PM.busy && Date.now()>=PM.nextAt) pmRefresh(); else pmStatus(); }, 1000);
+function wake(){ if(document.visibilityState==='hidden') return; if(Date.now()-PM.lastTry>3000) pmRefresh(); if(tseReady && S.lastFetch && Date.now()-S.lastFetch>5000) tseRefresh(); }
+document.addEventListener('visibilitychange', wake); addEventListener('focus', wake); addEventListener('pageshow', wake);
+pmRefresh();
 </script>
 </body>
 </html>

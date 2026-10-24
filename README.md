@@ -1,5 +1,3 @@
-**En vivo:** https://alejandrowalter.github.io/Brasil-elecciones/
-
 # Brasil 2026 · 2ª vuelta — seguimiento en vivo
 
 **Cómo abrirlo (Mac):** haz doble clic en `index.html` (se abre en Chrome o Safari). Se actualiza sola cada 60 s con los datos oficiales del TSE; no requiere instalar nada.
@@ -19,7 +17,7 @@
 Debajo del mapa hay un panel con las probabilidades de **Polymarket** (mercado de apuestas, **no es un resultado oficial**):
 - Mercado principal: [Brazil Presidential Election](https://polymarket.com/event/brazil-presidential-election): probabilidad de Flávio Bolsonaro (azul) y Lula (rojo) = punto medio del libro de órdenes (CLOB `/midpoint`; si no hay, último trade), cambio en la última hora y desde que abriste la página, gráfico de las últimas 24 h (botón Zoom / 0–100%) que se va extendiendo en vivo, volumen y liquidez.
 - [Margen de victoria en 2ª vuelta](https://polymarket.com/event/brazil-presidential-election-second-round-margin-of-victory) y los mercados de **gobernador** de los 6 estados en 2ª vuelta (AC, AM, DF, ES, RN, TO), con el bloque de cada candidato.
-- Se actualiza cada 30 s. Las APIs públicas de Polymarket (`gamma-api.polymarket.com`, `clob.polymarket.com`) responden con `Access-Control-Allow-Origin: *`, así que funciona abriendo el archivo directamente (doble clic), desde `proxy.py` o desde una página publicada; **no necesita proxy**.
+- Se actualiza cada 30 s, y al instante cuando vuelves a la pestaña o a la app (iPhone/Mac suspenden los temporizadores en segundo plano). Todos los precios (candidatos, margen y gobernadores) vienen del libro de órdenes en vivo (CLOB, `POST /midpoints` y `/last-trades-prices`); Gamma solo se usa para encontrar los mercados y para volumen/liquidez (cada 5 min, porque su CDN guarda caché 5 min). La cabecera dice «Actualizado HH:MM:SS · próxima en N s» o «⚠ sin actualizar desde HH:MM:SS» si falla; «= sin cambio» indica que el precio no se movió desde la consulta anterior (mercado quieto, no página congelada). Prueba: `?pmtest=1` refresca cada 5 s y escribe en la consola; `?pmtest=stale` simula un fallo tras 2 actualizaciones. Las APIs públicas de Polymarket (`gamma-api.polymarket.com`, `clob.polymarket.com`) responden con `Access-Control-Allow-Origin: *`, así que funciona abriendo el archivo directamente (doble clic), desde `proxy.py` o desde una página publicada; **no necesita proxy**.
 - Si Polymarket no responde, el panel muestra "Polymarket no disponible" y el resto de la página (TSE) sigue funcionando.
 
 ## URL pública
