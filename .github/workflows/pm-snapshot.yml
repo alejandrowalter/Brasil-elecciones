@@ -1,8 +1,6 @@
 name: Polymarket snapshot (pm.json)
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'   # GitHub no garantiza la hora exacta: en la práctica cada 5–15 min
   workflow_dispatch:
 
 permissions:
